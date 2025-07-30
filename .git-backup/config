@@ -1,0 +1,11 @@
+[core]
+	repositoryformatversion = 0
+	filemode = false
+	bare = false
+	logallrefupdates = true
+	ignorecase = true
+[branch "main"]
+	vscode-merge-base = origin/main
+[remote "origin"]
+	url = https://github.com/Mohammad-alazafa/open-webui.git
+	fetch = +refs/heads/*:refs/remotes/origin/*
