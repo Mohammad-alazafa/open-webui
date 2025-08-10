@@ -1,46 +1,46 @@
-name: Build and publish Docker images (main + cuda) to GHCR
+name: Build & Publish Docker images (main + cuda) to GHCR
 
 on:
   push:
-    branches: [ "main" ]   # عدّل الفروع حسب رغبتك
-    tags: [ "v*" ]         # يدعم الإصدار عبر التاجات أيضاً
-  workflow_dispatch:       # تشغيل يدوي
+    branches: [ "main" ]
+    tags: [ "v*" ]
+  workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write          # ضروري للـ push إلى ghcr.io
-  # id-token: write        # فعّلها فقط إذا ستستخدم توقيع/سياسات متقدمة
+  packages: write
+  # id-token: write # فعّلها لاحقًا إذا احتجت توقيع/إثباتات Supply Chain
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}   # يساوي OWNER/REPO تلقائياً
-  # لتغيير الاسم (اختياري): IMAGE_NAME: mohammad-alazafa/open-webui
+  IMAGE_NAME: ${{ github.repository }}
 
 concurrency:
-  group: publish-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref_name }}
   cancel-in-progress: true
 
 jobs:
-  build-and-push:
-    name: Build and push (${{ matrix.variant }}) • ${{ matrix.platform }}
-    runs-on: ${{ matrix.runner }}
+  build:
+    name: Build & push → ${{ matrix.variant }} • ${{ matrix.platforms }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        variant: [ "main", "cuda" ]   # نبني صورتين
-        platform: [ "linux/amd64", "linux/arm64" ]
         include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
+          # صورة أساسية متعددة المعماريات
+          - variant: main
+            platforms: linux/amd64,linux/arm64
+            suffix: ""
+          # صورة CUDA (amd64 فقط عادة)
+          - variant: cuda
+            platforms: linux/amd64
+            suffix: "-cuda"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # QEMU مطلوب لبناء cross-arch
-      - name: Set up QEMU
+      - name: Set up QEMU (cross-arch)
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
@@ -51,43 +51,54 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          # استخدم GHCR_TOKEN إذا أضفت PAT في Secrets. وإلا اترك GITHUB_TOKEN.
-          password: ${{ secrets.GHCR_TOKEN != '' && secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      # توليد وسوم/ليبلز ذكية
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=auto
+            suffix=${{ matrix.suffix }}
           tags: |
-            # وسوم عامة
-            type=raw,value=git-${{ github.sha }}${{ matrix.variant == 'cuda' && '-cuda' || '' }}
-            # عند الدفع إلى main
-            type=raw,value=${{ matrix.variant == 'cuda' && 'latest-cuda' || 'latest' }},enable={{is_default_branch}}
-            type=raw,value=${{ matrix.variant == 'cuda' && 'cuda' || 'main' }},enable={{is_default_branch}}
+            type=ref,event=branch
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.title=${{ matrix.variant }} image
 
-      # اختياري: استخدم Dockerfile مختلف لـ CUDA إذا كان لديك واحد (مثلاً Dockerfile.cuda)
-      # خلاف ذلك، استخدم نفس Dockerfile مع BUILD ARG يفعّل CUDA
-      - name: Build and push image
+      - name: Select Dockerfile (auto CUDA)
+        id: df
+        shell: bash
+        run: |
+          if [[ "${{ matrix.variant }}" == "cuda" && -f Dockerfile.cuda ]]; then
+            echo "path=Dockerfile.cuda" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=Dockerfile" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build & push image
+        id: buildpush
         uses: docker/build-push-action@v6
         with:
           context: .
-          # إن لديك Dockerfile.cuda أزل التعليق واستخدم السطر التالي:
-          # file: ${{ matrix.variant == 'cuda' && 'Dockerfile.cuda' || 'Dockerfile' }}
-          file: Dockerfile
-          platforms: ${{ matrix.platform }}
+          file: ${{ steps.df.outputs.path }}
+          platforms: ${{ matrix.platforms }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # لو كان Dockerfile يدعم تمكين CUDA عبر ARG/target:
           build-args: |
             VARIANT=${{ matrix.variant }}
-          # كاش سريع
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ matrix.variant }}-${{ matrix.platform }}
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ matrix.variant }}-${{ matrix.platform }},mode=max
+          # كاش سريع ومجاني على Actions — بدون شرطات مائلة في الاسم
+          cache-from: type=gha,scope=${{ github.workflow }}-${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ github.workflow }}-${{ matrix.variant }}
+          provenance: false
+
+      - name: Inspect pushed image (manifest)
+        run: |
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.buildpush.outputs.digest }}
